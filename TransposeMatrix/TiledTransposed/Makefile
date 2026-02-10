@@ -10,7 +10,7 @@ endif
 ARCH_FLAGS := -arch=compute_75 -code=sm_75
 
 # Flags de Compilação
-CFLAGS := -O2 $(ARCH_FLAGS) -std=c++14 --compiler-options -Wall
+CFLAGS := -O3 $(ARCH_FLAGS) -std=c++14 --compiler-options -Wall
 
 # Diretórios
 INCLUDE_DIRS := -I./include \
