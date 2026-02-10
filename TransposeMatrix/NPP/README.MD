@@ -1,0 +1,1 @@
+This kernel transposes a matrix using NPP library. The transposition is out-of-place which means that we have to use double the space in the GPU. We use the transposed of opencv to compare.
