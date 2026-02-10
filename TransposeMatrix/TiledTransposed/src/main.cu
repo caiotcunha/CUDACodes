@@ -8,14 +8,91 @@
 
 
 #define TILE_DIM 32
-#define BLOCK_ROWS 32
+#define BLOCK_ROWS 8
+
+// Otimizado com uint4: lê/escreve 4 bytes por vez
+__global__ void transposeInPlaceTiledOpt(unsigned char *data, int width, int height, size_t pitch)
+{
+  __shared__ uint4 tileA[TILE_DIM][TILE_DIM/4 + 1];
+  __shared__ uint4 tileB[TILE_DIM][TILE_DIM/4 + 1];
+  
+  int bx = blockIdx.x;
+  int by = blockIdx.y;
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
+
+  // Diagonal tile: transpose in-place
+  if (bx == by) {
+    // Load 4 pixels at a time
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+      int row = by * TILE_DIM + ty + i;
+      int col = bx * TILE_DIM + tx * 4;
+      if (row < height && col < width - 3) {
+        uint4 *rowPtr = (uint4 *)((char*)data + row * pitch);
+        tileA[ty + i][tx] = rowPtr[col / 4];
+      }
+    }
+
+    __syncthreads();
+
+    // Write transposed
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+      int row = by * TILE_DIM + tx * 4;
+      int col = bx * TILE_DIM + ty + i;
+      if (row < height - 3 && col < width) {
+        uint4 *rowPtr = (uint4 *)((char*)data + row * pitch);
+        rowPtr[(col) / 4] = tileA[tx][ty + i];
+      }
+    }
+  }
+  // Off-diagonal tiles
+  else if (bx < by) {
+    // Load A and B
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+      int rowA = by * TILE_DIM + ty + i;
+      int colA = bx * TILE_DIM + tx * 4;
+      if (rowA < height && colA < width - 3) {
+        uint4 *rowPtrA = (uint4 *)((char*)data + rowA * pitch);
+        tileA[ty + i][tx] = rowPtrA[colA / 4];
+      }
+
+      int rowB = bx * TILE_DIM + ty + i;
+      int colB = by * TILE_DIM + tx * 4;
+      if (rowB < height && colB < width - 3) {
+        uint4 *rowPtrB = (uint4 *)((char*)data + rowB * pitch);
+        tileB[ty + i][tx] = rowPtrB[colB / 4];
+      }
+    }
+
+    __syncthreads();
+
+    // Write swap
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+      int rowA = by * TILE_DIM + tx * 4;
+      int colA = bx * TILE_DIM + ty + i;
+      if (rowA < height - 3 && colA < width) {
+        uint4 *rowPtrA = (uint4 *)((char*)data + rowA * pitch);
+        rowPtrA[colA / 4] = tileB[tx][ty + i];
+      }
+
+      int rowB = bx * TILE_DIM + tx * 4;
+      int colB = by * TILE_DIM + ty + i;
+      if (rowB < height - 3 && colB < width) {
+        uint4 *rowPtrB = (uint4 *)((char*)data + rowB * pitch);
+        rowPtrB[colB / 4] = tileA[tx][ty + i];
+      }
+    }
+  }
+}
+
 
 #define DEVICE_MALLOC_LIMIT 1024*1024*1024
 
+
 __global__ void transposeInPlaceTiled(unsigned char *data, int width, int height, size_t pitch)
 {
-  __shared__ unsigned char tileA[TILE_DIM][TILE_DIM + 4];
-  __shared__ unsigned char tileB[TILE_DIM][TILE_DIM + 4];
+  __shared__ unsigned char tileA[TILE_DIM][TILE_DIM + 1];
+  __shared__ unsigned char tileB[TILE_DIM][TILE_DIM + 1];
   int bx = blockIdx.x;
   int by = blockIdx.y;
   int tx = threadIdx.x;
@@ -92,6 +169,8 @@ __global__ void transposeInPlaceTiled(unsigned char *data, int width, int height
     }
   }
 }
+
+
 
 
 // filename deve ser de um arquivo pgm
@@ -256,10 +335,10 @@ int main(int argc, char** argv) {
     
     auto tStart = std::chrono::high_resolution_clock::now();
 
-    // Configure launch dimensions and run tiled in-place transpose
+    // Configure launch dimensions and run in-place transpose with coalesced reads
     dim3 dimBlock(TILE_DIM, BLOCK_ROWS);
     dim3 dimGrid((size + TILE_DIM - 1) / TILE_DIM, (size + TILE_DIM - 1) / TILE_DIM);
-    transposeInPlaceTiled<<<dimGrid, dimBlock>>>(d_marker, size, size, pitchMarker);
+    transposeInPlaceTiledOpt<<<dimGrid, dimBlock>>>(d_marker, size, size, pitchMarker);
     cudaError_t kernErr = cudaGetLastError();
     if (kernErr != cudaSuccess) {
       printf("Kernel launch error: %s\n", cudaGetErrorString(kernErr));
@@ -276,12 +355,12 @@ int main(int argc, char** argv) {
 
     cv::Mat output_img(cv::Size(size, size), CV_8UC1);
     // Enviamos o resultado para o host
-    cudaMemcpy2D(output_img.data, output_img.step, 
-                    d_marker, pitchMarker, 
-                    size * sizeof(unsigned char), size, 
-                    cudaMemcpyDeviceToHost);
+    // cudaMemcpy2D(output_img.data, output_img.step, 
+    //                 d_marker, pitchMarker, 
+    //                 size * sizeof(unsigned char), size, 
+    //                 cudaMemcpyDeviceToHost);
 
-    cv::imwrite(output_filename, output_img);
+    // cv::imwrite(output_filename, output_img);
 
     cudaFree(d_marker);
     //cudaFree(d_mask);
